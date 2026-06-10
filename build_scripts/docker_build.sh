@@ -32,11 +32,8 @@ else
 fi
 
 # Ensure the fastembed model cache is populated on the host before building;
-# the Dockerfile COPY-step pulls from this directory. Validate sentinel files
-# rather than mere non-emptiness so a half-finished prefetch never bakes a
-# broken cache into the image.
-if [ ! -f "$CACHE_DIR/models--qdrant--all-MiniLM-L6-v2-onnx/refs/main" ] || \
-   [ ! -f "$CACHE_DIR/fast-all-MiniLM-L6-v2/model.onnx" ]; then
+# the Dockerfile COPY-step pulls from this directory.
+if ! HF_ENDPOINT="${HF_MIRROR_ENDPOINT}" "$SCRIPT_DIR/prefetch_model.sh" --check-only; then
     echo "[build] fastembed cache missing or incomplete, running prefetch..."
     HF_ENDPOINT="${HF_MIRROR_ENDPOINT}" "$SCRIPT_DIR/prefetch_model.sh"
 fi
