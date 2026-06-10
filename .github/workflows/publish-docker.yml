@@ -1,0 +1,125 @@
+name: Publish Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "datus-agent PyPI version to install in the image, for example 0.3.3"
+        required: true
+        type: string
+      tag_latest:
+        description: "Also tag the image as latest"
+        required: false
+        default: false
+        type: boolean
+      use_cn_mirror:
+        description: "Use China mirrors (DaoCloud base, Aliyun apt/pypi, hf-mirror)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-docker-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and push Docker image to GHCR
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/datus-agent
+      DATUS_VERSION: ${{ inputs.version }}
+      USE_CN_MIRROR: ${{ inputs.use_cn_mirror }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install project dependencies for prefetch
+        run: uv sync
+
+      - name: Prefetch fastembed model cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${USE_CN_MIRROR}" == "true" ]]; then
+            export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+          else
+            export HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}"
+          fi
+          ./build_scripts/prefetch_model.sh
+
+      - name: Resolve Docker build arguments
+        id: build_args
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${USE_CN_MIRROR}" == "true" ]]; then
+            echo "base_image=m.daocloud.io/docker.io/library/python:3.12-slim" >> "$GITHUB_OUTPUT"
+            echo "hf_mirror_endpoint=https://hf-mirror.com" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_image=python:3.12-slim" >> "$GITHUB_OUTPUT"
+            echo "hf_mirror_endpoint=https://huggingface.co" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: image_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags="${IMAGE_NAME}:${DATUS_VERSION}"
+          if [[ "${{ inputs.tag_latest }}" == "true" ]]; then
+            tags="${tags},${IMAGE_NAME}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build_scripts/Dockerfile
+          push: true
+          build-args: |
+            DATUS_VERSION=${{ env.DATUS_VERSION }}
+            USE_CN_MIRROR=${{ env.USE_CN_MIRROR }}
+            BASE_IMAGE=${{ steps.build_args.outputs.base_image }}
+            HF_MIRROR_ENDPOINT=${{ steps.build_args.outputs.hf_mirror_endpoint }}
+          tags: ${{ steps.image_tags.outputs.tags }}
+
+      - name: Record publish summary
+        shell: bash
+        run: |
+          {
+            echo "### Docker image"
+            echo
+            echo "- Image: \`${IMAGE_NAME}:${DATUS_VERSION}\`"
+            echo "- Latest tag: \`${{ inputs.tag_latest }}\`"
+            echo "- China mirrors: \`${USE_CN_MIRROR}\`"
+            echo "- PyPI version: \`${DATUS_VERSION}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
